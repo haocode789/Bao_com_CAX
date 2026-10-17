@@ -1,11 +1,17 @@
 const express = require('express');
 const { createClient } = require('@libsql/client');
+const path = require('path'); // Đã thêm thư viện path (Sửa lỗi Cannot GET /)
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use(express.static('public'));
+
+// Đã thêm: Định tuyến cho trang chủ để Vercel biết cách hiển thị giao diện index.html
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
   console.error('❌ LỖI NGHIÊM TRỌNG: Chưa cấu hình TURSO_DATABASE_URL hoặc TURSO_AUTH_TOKEN!');
@@ -193,7 +199,6 @@ app.get('/api/get-user-meal', async (req, res) => {
     }
 });
 
-// API BÁO CƠM VỚI KIỂM TRA GIỜ CHÓT (08:00 và 15:00)
 app.post('/api/register-meal', async (req, res) => {
     const { username, date, trua, toi } = req.body;
 
@@ -210,7 +215,6 @@ app.post('/api/register-meal', async (req, res) => {
     if (date === nowLocalDateStr) {
         const currentHour = now.getHours();
         
-        // Lấy dữ liệu cũ để đối chiếu
         const oldMeal = await db.execute({
             sql: `SELECT trua, toi FROM meal_registrations WHERE username = ? AND date = ?`,
             args: [username, date]
@@ -243,7 +247,6 @@ app.post('/api/register-meal', async (req, res) => {
     }
 });
 
-// API LẤY LỊCH SỬ BÁO CƠM CỦA MỘT TÀI KHOẢN (TRÍCH XUẤT)
 app.get('/api/user/my-history', async (req, res) => {
     const { username, fromDate, toDate } = req.query;
 
@@ -331,73 +334,3 @@ app.get('/api/stats/user-range', async (req, res) => {
         WHERE 1=1
     `;
     const params = [];
-
-    if (fromDate) {
-        query += ` AND m.date >= ?`;
-        params.push(fromDate);
-    }
-    if (toDate) {
-        query += ` AND m.date <= ?`;
-        params.push(toDate);
-    }
-    if (username) {
-        query += ` AND m.username = ?`;
-        params.push(username);
-    }
-
-    query += ` GROUP BY m.username ORDER BY grand_total DESC`;
-
-    try {
-        const result = await db.execute({ sql: query, args: params });
-        res.json(result.rows);
-    } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
-
-app.get('/api/export/user-meals', async (req, res) => {
-    const { username, fromDate, toDate } = req.query;
-
-    if (!username) {
-        return res.status(400).json({ success: false, message: 'Thiếu tên tài khoản!' });
-    }
-
-    let query = `
-        SELECT 
-            m.date, 
-            m.trua, 
-            m.toi,
-            u.name
-        FROM meal_registrations m
-        LEFT JOIN users u ON m.username = u.username
-        WHERE m.username = ?
-    `;
-    const params = [username];
-
-    if (fromDate) {
-        query += ` AND m.date >= ?`;
-        params.push(fromDate);
-    }
-    if (toDate) {
-        query += ` AND m.date <= ?`;
-        params.push(toDate);
-    }
-
-    query += ` ORDER BY m.date DESC`;
-
-    try {
-        const result = await db.execute({ sql: query, args: params });
-        res.json({ success: true, data: result.rows });
-    } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
-
-if (process.env.NODE_ENV !== 'production') {
-    app.listen(PORT, () => {
-        console.log(`Server đang chạy tại port ${PORT}`);
-    });
-}
-
-// Bắt buộc thêm dòng này để Vercel chạy được ứng dụng
-module.exports = app;
