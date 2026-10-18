@@ -6,7 +6,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Đã thêm: Định tuyến cho trang chủ để Vercel biết cách hiển thị giao diện index.html
 app.get('/', (req, res) => {
@@ -14,13 +14,12 @@ app.get('/', (req, res) => {
 });
 
 if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
-  console.error('❌ LỖI NGHIÊM TRỌNG: Chưa cấu hình TURSO_DATABASE_URL hoặc TURSO_AUTH_TOKEN!');
-  process.exit(1);
+  console.error('❌ LỖI: Chưa cấu hình TURSO_DATABASE_URL hoặc TURSO_AUTH_TOKEN!');
 }
 
 const db = createClient({
-  url: process.env.TURSO_DATABASE_URL,
-  authToken: process.env.TURSO_AUTH_TOKEN
+  url: (process.env.TURSO_DATABASE_URL || '').trim(),
+  authToken: (process.env.TURSO_AUTH_TOKEN || '').trim()
 });
 
 async function initDB() {
@@ -66,10 +65,30 @@ async function initDB() {
         console.log('🚀 Đồng bộ CSDL Turso thành công!');
     } catch (err) {
         console.error('❌ Lỗi kết nối CSDL:', err.message);
-        process.exit(1);
+        throw err;
     }
 }
-initDB();
+
+let dbReady = null;
+app.use('/api', async (req, res, next) => {
+    try {
+        if (!dbReady) dbReady = initDB();
+        await dbReady;
+        next();
+    } catch (err) {
+        dbReady = null; // lần sau thử lại
+        res.status(500).json({ success: false, message: 'Lỗi kết nối CSDL: ' + err.message });
+    }
+});
+
+// Giờ Việt Nam (Vercel chạy giờ UTC nên phải tự quy đổi)
+function nowVN() {
+    const vn = new Date(Date.now() + 7 * 60 * 60 * 1000);
+    const yyyy = vn.getUTCFullYear();
+    const mm = String(vn.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(vn.getUTCDate()).padStart(2, '0');
+    return { dateStr: `${yyyy}-${mm}-${dd}`, hour: vn.getUTCHours() };
+}
 
 app.get('/api/health', async (req, res) => {
     try {
@@ -202,35 +221,29 @@ app.get('/api/get-user-meal', async (req, res) => {
 app.post('/api/register-meal', async (req, res) => {
     const { username, date, trua, toi } = req.body;
 
-    const now = new Date();
-    const yyyy = now.getFullYear();
-    const mm = String(now.getMonth() + 1).padStart(2, '0');
-    const dd = String(now.getDate()).padStart(2, '0');
-    const nowLocalDateStr = `${yyyy}-${mm}-${dd}`;
+    const { dateStr: nowLocalDateStr, hour: currentHour } = nowVN();
 
     if (date < nowLocalDateStr) {
         return res.json({ success: false, message: 'Không thể báo/sửa cơm cho các ngày đã qua!' });
     }
 
-    if (date === nowLocalDateStr) {
-        const currentHour = now.getHours();
-        
-        const oldMeal = await db.execute({
-            sql: `SELECT trua, toi FROM meal_registrations WHERE username = ? AND date = ?`,
-            args: [username, date]
-        });
-        const oldTrua = oldMeal.rows.length > 0 ? Boolean(oldMeal.rows[0].trua) : false;
-        const oldToi = oldMeal.rows.length > 0 ? Boolean(oldMeal.rows[0].toi) : false;
-
-        if (currentHour >= 8 && trua !== oldTrua) {
-            return res.json({ success: false, message: 'Đã quá 08:00 sáng! Bạn không thể đăng ký hoặc hủy cơm trưa hôm nay.' });
-        }
-        if (currentHour >= 15 && toi !== oldToi) {
-            return res.json({ success: false, message: 'Đã quá 15:00 chiều! Bạn không thể đăng ký hoặc hủy cơm tối hôm nay.' });
-        }
-    }
-
     try {
+        if (date === nowLocalDateStr) {
+            const oldMeal = await db.execute({
+                sql: `SELECT trua, toi FROM meal_registrations WHERE username = ? AND date = ?`,
+                args: [username, date]
+            });
+            const oldTrua = oldMeal.rows.length > 0 ? Boolean(oldMeal.rows[0].trua) : false;
+            const oldToi = oldMeal.rows.length > 0 ? Boolean(oldMeal.rows[0].toi) : false;
+
+            if (currentHour >= 8 && Boolean(trua) !== oldTrua) {
+                return res.json({ success: false, message: 'Đã quá 08:00 sáng! Bạn không thể đăng ký hoặc hủy cơm trưa hôm nay.' });
+            }
+            if (currentHour >= 15 && Boolean(toi) !== oldToi) {
+                return res.json({ success: false, message: 'Đã quá 15:00 chiều! Bạn không thể đăng ký hoặc hủy cơm tối hôm nay.' });
+            }
+        }
+
         await db.execute({
             sql: `DELETE FROM meal_registrations WHERE username = ? AND date = ?`,
             args: [username, date]
@@ -321,7 +334,7 @@ app.get('/api/stats/daily', async (req, res) => {
 
 app.get('/api/stats/user-range', async (req, res) => {
     const { fromDate, toDate, username } = req.query;
-    
+
     let query = `
         SELECT 
             m.username,
@@ -334,3 +347,73 @@ app.get('/api/stats/user-range', async (req, res) => {
         WHERE 1=1
     `;
     const params = [];
+
+    if (fromDate) {
+        query += ` AND m.date >= ?`;
+        params.push(fromDate);
+    }
+    if (toDate) {
+        query += ` AND m.date <= ?`;
+        params.push(toDate);
+    }
+    if (username) {
+        query += ` AND (m.username LIKE ? OR u.name LIKE ?)`;
+        params.push(`%${username}%`, `%${username}%`);
+    }
+
+    query += ` GROUP BY m.username, u.name ORDER BY grand_total DESC`;
+
+    try {
+        const result = await db.execute({ sql: query, args: params });
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+app.get('/api/export/user-meals', async (req, res) => {
+    const { username, fromDate, toDate } = req.query;
+
+    let query = `
+        SELECT m.date, m.trua, m.toi, u.name
+        FROM meal_registrations m
+        LEFT JOIN users u ON m.username = u.username
+        WHERE 1=1
+    `;
+    const params = [];
+
+    if (username) {
+        query += ` AND m.username = ?`;
+        params.push(username);
+    }
+    if (fromDate) {
+        query += ` AND m.date >= ?`;
+        params.push(fromDate);
+    }
+    if (toDate) {
+        query += ` AND m.date <= ?`;
+        params.push(toDate);
+    }
+
+    query += ` ORDER BY m.date DESC`;
+
+    try {
+        const result = await db.execute({ sql: query, args: params });
+        const data = result.rows.map(r => ({
+            date: r.date,
+            name: r.name,
+            trua: Boolean(r.trua),
+            toi: Boolean(r.toi)
+        }));
+        res.json({ success: true, data });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// Vercel: export app. Render/máy tính: vẫn listen như bình thường.
+module.exports = app;
+
+if (require.main === module) {
+    app.listen(PORT, () => console.log(`🚀 Server chạy tại cổng ${PORT}`));
+}
