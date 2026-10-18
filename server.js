@@ -1,5 +1,5 @@
 const express = require('express');
-const { createClient } = require('@libsql/client');
+const { createClient } = require('@libsql/client/web');
 const path = require('path'); // Đã thêm thư viện path (Sửa lỗi Cannot GET /)
 
 const app = express();
